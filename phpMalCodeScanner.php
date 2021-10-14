@@ -217,5 +217,6 @@ class PhpMalCodeScan
 ############################################ INITIATE CLASS
 
 ini_set('memory_limit', '-1'); ## Avoid memory errors (i.e in foreachloop)
+ini_set('max_execution_time', 600); ## Set 10 minute time limit
 
 new PhpMalCodeScan;
