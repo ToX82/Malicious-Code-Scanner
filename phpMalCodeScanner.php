@@ -26,7 +26,7 @@ define('DETECT_LONG_LINES', false);
 // Threshold to trigger the recognition of a long line
 define('LONG_LINE_THRESHOLD', 350);
 // Indicate which files to match (this prevents checking of image files, PDFs etc)
-define('FILES_TO_MATCH', '#\.(php|php4|php5|phtml|html|htaccess)#');
+define('FILES_TO_MATCH', '#\.(php|php4|php5|php7|php8|phtml|html|htaccess)#');
 // Ignore symlinked folders
 define('IGNORE_LINK', true);
 // Set to true to check some Wordpress specific stuff
@@ -42,15 +42,22 @@ class PhpMalCodeScan
     public $scanned_dir = '';
     private $scanned_files = [];
     private $scan_patterns = [
-        '/if\(isset\($_GET\[[a-z][0-9][0-9]+/i',
-        '/eval\(base64/i',
-        '/eval\(\$./i',
-        '/[ue\"\'];\$/',
-        '/;@ini/i',
-        '/((?<![a-z0-9_])eval\((base64|eval|\$_|\$\$|\$[A-Za-z_0-9\{]*(\(|\{|\[)))|(\$_COOKIE\[[\'"a-z0-9_]+\]\()/i',
-        '/(\\x[a-z0-9]{1,3}\\x[a-z0-9]{1,3})|(chr\([0-9]{1,3}\)\.chr\([0-9]{1,3}\))/i',
-        '/\) \% 3;if \(/',
-        '/=\$GLOBALS;\${"\\\/'
+        '/eval\(base64/i' => 'eval(base64())',
+        '/gzinflate\(base64/i' => 'gzinflate(base64())',
+        '/leafmailer/i' => 'leafmailer',
+        '/cmsmap/i' => 'cmsmap',
+        '/WordPress Shell/i' => 'Wordpress Shell',
+        '/<\?php[\s]{80}/i' => 'PHP tag with 80+ spaces',
+        '/if\(isset\($_GET\[[a-z][0-9][0-9]+/i' => 'Direct access to $_GET',
+        // '/eval\(\$./i' => 'eval($)', // This seems to lead to false positives
+        // '/[ue\"\'];\$/' => 'ue', // This seems to lead to false positives
+        '/;@ini/i' => 'Ini file',
+        '/((?<![a-z0-9_])eval\((base64|eval|\$_|\$\$|\$[A-Za-z_0-9\{]*(\(|\{|\[)))|(\$_COOKIE\[[\'"a-z0-9_]+\]\()/i' => 'Multiple pattern',
+        '/(\\x[a-z0-9]{1,3}\\x[a-z0-9]{1,3})|(chr\([0-9]{1,3}\)\.chr\([0-9]{1,3}\))/i' => 'Multiple pattern 2',
+        '/\) \% 3;if \(/' => '3;if',
+        '/=\$GLOBALS;\${"\\\/' => 'Accessing $GLOBALS',
+        '/base64_decode\(\$_POST/i' => 'base64_decode($_POST)',
+        '/;@include/i' => 'Suspect Include',
     ];
 
     public function __construct()
@@ -86,6 +93,11 @@ class PhpMalCodeScan
                 $this->$scanned_dir = $dir;
                 $do_scan = true;
             }
+        } else {
+            // get first argument passed through command line
+            if (!empty($_SERVER['argv'])) {
+                $dir = '/' . ($_SERVER['argv'][1]);
+            }
         }
 
         if ($do_scan) {
@@ -110,10 +122,8 @@ class PhpMalCodeScan
         }
 
         foreach ($files as $file) {
-            if (
-                is_file($dir . '/' . $file) && !in_array($dir . '/' . $file, $this->scanned_files) &&
-                preg_match(FILES_TO_MATCH, $file)
-            ) {
+            if (is_file($dir . '/' . $file) && !in_array($dir . '/' . $file, $this->scanned_files) &&
+                preg_match(FILES_TO_MATCH, $file)) {
                 if (VERBOSE_OUTPUT) {
                     print "\nChecking file: $dir/$file";
                 }
@@ -132,30 +142,40 @@ class PhpMalCodeScan
         $line_ending = $this->lineEnding();
         $this->scanned_files[] = $file;
         $patterns = '';
-        foreach ($this->scan_patterns as $key => $pattern) {
+        $descriptions = [];
+        foreach ($this->scan_patterns as $pattern => $description) {
             if (preg_match($pattern, $contents)) {
                 if ($file !== __FILE__) {
                     $patterns .= $pattern;
+                    $descriptions[] = $description;
                 }
             }
         }
         if (!empty($patterns)) {
             $this->infected_files[] = [
                 'file' => $file,
-                'patterns_matched' => $this->isCommandLineInterface() ? $patterns : highlight_string($patterns, true)
+                'patterns_matched' => $this->isCommandLineInterface() ? " [" . implode(", ", $descriptions) . "]" : highlight_string($patterns, true)
             ];
         }
 
         if (WORDPRESS) {
             $filename = basename($file);
             if (($filename === 'wp-config.php' || $filename === 'settings.php' || $filename === 'index.php') &&
-                preg_match('/@include ("|\')\\\|#s@/', $contents)
-            ) {
+                preg_match('/@include ("|\')\\\|#s@/', $contents)) {
                 $this->infected_files[] = [
                     'file' => $file,
                     'patterns_matched' => ' [possibly infected WP file]'
                 ];
                 return true;
+            }
+            if (strpos($file, "wp-content/uploads/") && strpos($filename, ".php")) {
+                if (strpos($file, "uploads/cache/wpml/twig/") === false) {
+                    $this->infected_files[] = [
+                        'file' => $file,
+                        'patterns_matched' => ' [php file in a WP uploads directory]'
+                    ];
+                    return true;
+                }
             }
         }
         //  If checking for long lines is not enabled, leave the function now
@@ -218,4 +238,4 @@ class PhpMalCodeScan
 
 ini_set('memory_limit', '-1'); ## Avoid memory errors (i.e in foreachloop)
 
-new PhpMalCodeScan;
+new PhpMalCodeScan();
