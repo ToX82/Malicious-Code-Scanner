@@ -1,9 +1,9 @@
 <?php
 /*
-Name: php Malicious Code Scanner
+Name: PHP Malicious Code Scanner
 Original code URI: http://www.mikestowe.com/phpmalcode
 URI: https://github.com/mikeybeck/Malicious-Code-Scanner
-Description: The php Malicious Code Scanner checks all files for one of the most common malicious code attacks,
+Description: The PHP Malicious Code Scanner checks all files for one of the most common malicious code attacks,
 the eval( base64_decode() ) attack...
 Version: 1.3.2 alpha
 Authors: Michael Stowe, Phil Emerson, Mikey Beck
@@ -12,36 +12,25 @@ Credits: Based on the idea of Er. Rochak Chauhan (http://www.rochakchauhan.com/)
 License: GPL-2
  */
 
-// Verbose Output
+// Configuration Settings
 define('VERBOSE_OUTPUT', false);
-// Set to your email:
 define('SEND_EMAIL_ALERTS_TO', 'youremail@example.com');
-// Set to true to send results to the email address above
-define('SEND_EMAIL', true);
-// Set to true to display the results to the console (or log if you're redirecting the output)
+define('SEND_EMAIL', false);
 define('DISPLAY_RESULTS', true);
-// Set to true if you wish to check each file for unsually long lines (a common feature of injections).
-// Note - this will slow things down considerably!
 define('DETECT_LONG_LINES', false);
-// Threshold to trigger the recognition of a long line
 define('LONG_LINE_THRESHOLD', 350);
-// Indicate which files to match (this prevents checking of image files, PDFs etc)
 define('FILES_TO_MATCH', '#\.(php|php4|php5|php7|php8|phtml|html|htaccess)#');
-// Ignore symlinked folders
 define('IGNORE_LINK', true);
-// Set to true to check some Wordpress specific stuff
 define('WORDPRESS', true);
-// Password protect page
 define('PASSWORD', 'mysupersecretpassword');
-
-############################################ START CLASS
 
 class PhpMalCodeScan
 {
-    public $infected_files = [];
-    public $scanned_dir = '';
-    private $scanned_files = [];
-    private $scan_patterns = [
+    private $infectedFiles = [];
+    private $scannedDir = '';
+    private $baseDir = '';
+    private $scannedFiles = [];
+    private $scanPatterns = [
         '/eval\(base64/i' => 'eval(base64())',
         '/gzinflate\(base64/i' => 'gzinflate(base64())',
         '/leafmailer/i' => 'leafmailer',
@@ -49,60 +38,67 @@ class PhpMalCodeScan
         '/WordPress Shell/i' => 'Wordpress Shell',
         '/<\?php[\s]{80}/i' => 'PHP tag with 80+ spaces',
         '/if\(isset\($_GET\[[a-z][0-9][0-9]+/i' => 'Direct access to $_GET',
-        // '/eval\(\$./i' => 'eval($)', // This seems to lead to false positives
-        // '/[ue\"\'];\$/' => 'ue', // This seems to lead to false positives
         '/;@ini/i' => 'Ini file',
         '/((?<![a-z0-9_])eval\((base64|eval|\$_|\$\$|\$[A-Za-z_0-9\{]*(\(|\{|\[)))|(\$_COOKIE\[[\'"a-z0-9_]+\]\()/i' => 'Multiple pattern',
         '/(\\x[a-z0-9]{1,3}\\x[a-z0-9]{1,3})|(chr\([0-9]{1,3}\)\.chr\([0-9]{1,3}\))/i' => 'Multiple pattern 2',
         '/\) \% 3;if \(/' => '3;if',
         '/=\$GLOBALS;\${"\\\/' => 'Accessing $GLOBALS',
         '/base64_decode\(\$_POST/i' => 'base64_decode($_POST)',
-        '/;@include/i' => 'Suspect Include',
+        '/@include /i' => 'Suspect Include',
+        '/\\b[a-z0-9_]{1,15}\\(\\$[a-z_]{1,15}\\[\\d{1,2}\\]\\(\\$_/i' => 'Potentially Obfuscated PHP command',
+        '/<script[^>]+eval\\s*\\(/i' => 'Potentially Obfuscated JavaScript',
+        '/\\b(?:system|exec|passthru|shell_exec)\\s*\\(\\s*\\$_(GET|POST|REQUEST)\\[\\s*[\'"]cmd[\'"]\\s*\\]/i' => 'Command Execution via URL',
+        '/<\?php[\t]{25}/i' => 'PHP tag with 25+ tabs',
+
+        '/0x84;/i' => 'Comment',
+    ];
+
+    private $filePatterns = [
+        '.js.php' => 'Suspicious Fake JavaScript file',
     ];
 
     public function __construct()
     {
-        $do_scan = true;
+        $doScan = true;
+
         if (!$this->isCommandLineInterface()) {
             $pass = $_GET['pass'] ?? '';
             if ($pass !== PASSWORD) {
                 die();
             }
+
             // Get list of files & directories up one level
             $dirs = scandir(dirname(__FILE__) . '/..');
-?>
-            <form name='dirselectform' action='phpMalCodeScanner.php?pass=<?php echo $pass ?>' method='POST'>
-                <select name='dirselect'>
-<?php
-                foreach ($dirs as $dir) {
-                    echo dirname(__FILE__) . '/../' . $dir;
-                    if (is_dir(dirname(__FILE__) . '/../') . $dir) {
-?>
-                    <option value="<?php echo $dir ?>"><?php echo $dir ?></option>
-<?php
-                    }
+
+            echo "<form name='dirselectform' action='phpMalCodeScanner.php?pass=" . $pass . "' method='POST'>";
+            echo "<select name='dirselect'>";
+            foreach ($dirs as $dir) {
+                echo dirname(__FILE__) . '/../' . $dir;
+                if (is_dir(dirname(__FILE__) . '/../') . $dir) {
+                    echo "<option value='" . $dir . "'>" . $dir . "</option>";
                 }
-?>
-                </select>
-                <input type='submit'>
-            </form>
-<?php
-            $do_scan = false;
+            }
+            echo "</select>";
+            echo "<input type='submit'>";
+            echo "</form>";
+
+            $doScan = false;
             if (isset($_POST['dirselect'])) {
                 $dir = '/../' . $_POST['dirselect'];
-                $this->$scanned_dir = $dir;
-                $do_scan = true;
+                $this->scannedDir = $dir;
+                $doScan = true;
             }
         } else {
-            // get first argument passed through command line
+            // Get first argument passed through command line
             if (!empty($_SERVER['argv'])) {
                 $dir = '/' . ($_SERVER['argv'][1]);
             }
         }
 
-        if ($do_scan) {
+        if ($doScan) {
+            $this->baseDir = dirname(__FILE__) . ($dir ?? '');
             $this->scan(dirname(__FILE__) . ($dir ?? ''));
-            $this->sendalert();
+            $this->sendAlert();
         }
     }
 
@@ -113,20 +109,21 @@ class PhpMalCodeScan
 
     private function scan($dir)
     {
-        $this->scanned_files[] = $dir;
+        $this->scannedFiles[] = $dir;
         $files = scandir($dir);
 
         if (!is_array($files)) {
-            throw new Exception('Unable to scan directory ' . $dir . '.
-    Please make sure proper permissions have been set.');
+            throw new Exception('Unable to scan directory ' . $dir . '. Please make sure proper permissions have been set.');
         }
 
         foreach ($files as $file) {
-            if (is_file($dir . '/' . $file) && !in_array($dir . '/' . $file, $this->scanned_files) &&
-                preg_match(FILES_TO_MATCH, $file)) {
+            if (is_file($dir . '/' . $file) && !in_array($dir . '/' . $file, $this->scannedFiles) && preg_match(FILES_TO_MATCH, $file)) {
                 if (VERBOSE_OUTPUT) {
                     print "\nChecking file: $dir/$file";
                 }
+
+                $this->checkFileName($dir . '/' . $file);
+
                 $this->check(file_get_contents($dir . '/' . $file), $dir . '/' . $file);
             } elseif (is_dir($dir . '/' . $file) && substr($file, 0, 1) != '.') {
                 if (IGNORE_LINK && is_link($dir . '/' . $file)) {
@@ -137,48 +134,76 @@ class PhpMalCodeScan
         }
     }
 
+    private function checkFileName($filename)
+    {
+        foreach ($this->filePatterns as $pattern => $descriptions) {
+            if (strpos($filename, $pattern) !== false) {
+                $this->infectedFiles[] = [
+                    'file' => realpath($filename),
+                    'line' => 0,
+                    'patterns_matched' => $this->isCommandLineInterface() ? " [" . $descriptions . "]" : highlight_string($pattern, true),
+                ];
+            }
+        }
+    }
+
     private function check($contents, $file)
     {
-        $line_ending = $this->lineEnding();
-        $this->scanned_files[] = $file;
+        $lineEnding = $this->lineEnding();
+        $this->scannedFiles[] = $file;
         $patterns = '';
+        $foundLine = 0;
         $descriptions = [];
-        foreach ($this->scan_patterns as $pattern => $description) {
-            if (preg_match($pattern, $contents)) {
+        foreach ($this->scanPatterns as $pattern => $description) {
+            if (preg_match($pattern, $contents, $matches, PREG_OFFSET_CAPTURE)) {
                 if ($file !== __FILE__) {
+                    $offset = $matches[0][1];
+                    $foundLine = substr_count(substr($contents, 0, $offset), "\n") + 1;
+
                     $patterns .= $pattern;
                     $descriptions[] = $description;
                 }
             }
         }
         if (!empty($patterns)) {
-            $this->infected_files[] = [
-                'file' => $file,
-                'patterns_matched' => $this->isCommandLineInterface() ? " [" . implode(", ", $descriptions) . "]" : highlight_string($patterns, true)
+            // Find out in which line the pattern was found
+            $this->infectedFiles[] = [
+                'file' => realpath($file),
+                'line' => $foundLine,
+                'patterns_matched' => $this->isCommandLineInterface() ? " [" . implode(", ", $descriptions) . "]" : highlight_string($patterns, true),
             ];
         }
 
         if (WORDPRESS) {
             $filename = basename($file);
-            if (($filename === 'wp-config.php' || $filename === 'settings.php' || $filename === 'index.php') &&
-                preg_match('/@include ("|\')\\\|#s@/', $contents)) {
-                $this->infected_files[] = [
-                    'file' => $file,
-                    'patterns_matched' => ' [possibly infected WP file]'
-                ];
-                return true;
-            }
+
             if (strpos($file, "wp-content/uploads/") && strpos($filename, ".php")) {
-                if (strpos($file, "uploads/cache/wpml/twig/") === false) {
-                    $this->infected_files[] = [
-                        'file' => $file,
-                        'patterns_matched' => ' [php file in a WP uploads directory]'
-                    ];
-                    return true;
+                $isPhp = false;
+                // Twig cache is not to be considered
+                if (strpos($file, "uploads/cache/wpml/twig/") !== false) {
+                    $isPhp = true;
                 }
+                // Files with less than 30 bytes are not to be considered, if they only contain "Silence is golden"
+                if (filesize($file) > 30) {
+                    $isPhp = true;
+                } else {
+                    $content = file_get_contents($file);
+                    if (strpos($content, "Silence is golden") === false) {
+                        $isPhp = true;
+                    }
+                }
+
+                if ($isPhp === true) {
+                    $this->infectedFiles[] = [
+                        'file' => $file,
+                        'line' => $foundLine,
+                        'patterns_matched' => ' [php file in a WP uploads directory]',
+                    ];
+                }
+                return $isPhp;
             }
         }
-        //  If checking for long lines is not enabled, leave the function now
+        // If checking for long lines is not enabled, leave the function now
         if (!DETECT_LONG_LINES) {
             return false;
         }
@@ -190,8 +215,8 @@ class PhpMalCodeScan
             // Have we found a line longer than the threshold?
             if (strlen($line) > LONG_LINE_THRESHOLD) {
                 // Yes - add the file to the infected files list
-                $this->infected_files[] = $file . "\nLong line found on line $count\n    ---    " .
-                    substr($line, -100) . "\n";
+                $this->infectedFiles[] = $file . "\nLong line found on line $count\n    ---    " .
+                substr($line, -100) . "\n";
                 // Clean up.
                 $buffer = null;
                 unset($buffer);
@@ -200,6 +225,7 @@ class PhpMalCodeScan
             }
             $count++;
         }
+
         // Nothing detected in the current file - return false.
         return false;
     }
@@ -212,30 +238,61 @@ class PhpMalCodeScan
         return '<br>';
     }
 
-    private function sendalert()
+    private function sendAlert()
     {
-        $line_ending = $this->lineEnding();
-        if (count($this->infected_files) != 0) {
-            $message = "== MALICIOUS CODE FOUND == \n\n";
-            $message .= "The following " . count($this->infected_files) . " files appear to be infected: " .
-                $line_ending . $line_ending;
-            foreach ($this->infected_files as $inf) {
-                $message .= $line_ending . "  -  " . $inf['file'] . $inf['patterns_matched'] . $line_ending;
+        $lineEnding = $this->lineEnding();
+        $totalInfectedFiles = count($this->infectedFiles);
+
+        if ($totalInfectedFiles != 0) {
+            $this->println('== MALICIOUS CODE FOUND ==', 'red');
+            $this->println("The following $totalInfectedFiles files appear to be infected:$lineEnding$lineEnding");
+
+            foreach ($this->infectedFiles as $inf) {
+                $fullPath = realpath($inf['file']);
+                $filename = str_replace($this->baseDir, '', $fullPath);
+                $line = ($inf['line']) ? ' (line: ' . $inf['line'] . ')' : '';
+                $pattern = $inf['patterns_matched'];
+                $this->println(" - $filename $line $pattern $lineEnding", 'green');
             }
-            if (DISPLAY_RESULTS) {
-                print $line_ending . "$message";
-            }
+
+            $this->println("$lineEnding$totalInfectedFiles files appear to be infected. $lineEnding", 'red');
+
             if (SEND_EMAIL) {
-                mail(SEND_EMAIL_ALERTS_TO, 'Malicious Code Found!', $message, 'FROM:');
+                mail(SEND_EMAIL_ALERTS_TO, 'Malicious Code Found!', 'Malicious code found in the scanned files.', 'FROM:');
             }
         } else {
-            print 'No infected files found in ' . $this->$scanned_dir;
+            $this->println('No infected files found in ' . $this->baseDir);
         }
+    }
+
+    private function println($text, $color = null)
+    {
+        $coloredText = $text;
+
+        if ($color) {
+            $coloredText = "\033[" . $this->getForegroundColorCode($color) . "m$text\033[0m";
+        }
+
+        echo $coloredText;
+    }
+
+    private function getForegroundColorCode($color)
+    {
+        $colors = [
+            'black' => '0;30',
+            'red' => '0;31',
+            'green' => '0;32',
+            'yellow' => '0;33',
+            'blue' => '0;34',
+            'purple' => '0;35',
+            'cyan' => '0;36',
+            'white' => '1;37',
+        ];
+
+        return isset($colors[$color]) ? $colors[$color] : '';
     }
 }
 
-############################################ INITIATE CLASS
-
-ini_set('memory_limit', '-1'); ## Avoid memory errors (i.e in foreachloop)
-
+// Initialize Class
+ini_set('memory_limit', '-1');
 new PhpMalCodeScan();
